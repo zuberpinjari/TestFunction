@@ -9,6 +9,7 @@ using Newtonsoft.Json;
 using Org.BouncyCastle.Bcpg;
 using Org.BouncyCastle.Bcpg.OpenPgp;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 
@@ -25,6 +26,7 @@ namespace TestFunction
             {
                 string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
                 FileNames data = JsonConvert.DeserializeObject<FileNames>(requestBody);
+                var listResponse = new List<DecryptionResponse>();
 
                 string containerName = "teststuff";
                 var passpharse = "abcd";
@@ -50,27 +52,31 @@ namespace TestFunction
 
                         var fileStream = DownloadAsFileStream(blob);
 
-                        //PgpPrivateKey privateKeyP = ReadPrivateKey(privateKeyStream, passpharse);
+                        PgpPrivateKey privateKeyP = ReadPrivateKey(privateKeyStream, passpharse);
                         PgpPublicKey senderPublicKey = ReadPublicKey(publicKeyStream);
 
 
                         //DecryptAndVerifySignature(inputBlobStream, decryptedStream, senderPublicKey, privateKeyP);
-                        var decryptedData = DecryptAndVerifyFile(fileStream, senderPublicKey, null);
+                        var decryptedData = DecryptAndVerifyFile(fileStream, senderPublicKey, privateKeyP);
 
                         // Create a new blob for the encrypted data
-                        CloudBlockBlob encryptedBlob = container.GetBlockBlobReference(data.DestinationFolderName + "/decrypted_" + file.Split("_")[1].Replace(".pgp", ""));
+                        CloudBlockBlob decryptedBlob = container.GetBlockBlobReference(data.DestinationFolderName + "/decrypted_" + file.Split("_")[1].Replace(".pgp", ""));
 
                         // Upload the encrypted data to the new blob
-                        using (MemoryStream encryptedBlobStream = new MemoryStream(decryptedData))
+                        using (MemoryStream encryptedBlobStream = new MemoryStream(decryptedData.Item1))
                         {
-                            await encryptedBlob.UploadFromStreamAsync(encryptedBlobStream);
+                            await decryptedBlob.UploadFromStreamAsync(encryptedBlobStream);
                         }
 
-                        log.LogInformation($"Decryption completed for {file}");
+                        listResponse.Add(new DecryptionResponse()
+                        {
+                            DecryptedFilePath = decryptedBlob.Uri.ToString(),
+                            IsSignatureVerified = decryptedData.Item2
+                        }) ;
                     }
 
                 }
-                return new OkObjectResult($"Decryption completed!");
+                return new OkObjectResult(listResponse);
 
             }
             catch (Exception ex)
@@ -102,7 +108,7 @@ namespace TestFunction
             return new FileStream(tempFilePath, FileMode.Open, FileAccess.Read);
         }
 
-        public static byte[] DecryptAndVerifyFile(FileStream inputFileStream, PgpPublicKey publicKey, PgpPrivateKey privateKey)
+        public static (byte[], bool) DecryptAndVerifyFile(FileStream inputFileStream, PgpPublicKey publicKey, PgpPrivateKey privateKey)
         {
             try
             {
@@ -135,7 +141,6 @@ namespace TestFunction
                                     if (signature != null)
                                     {
                                         signature[0].InitVerify(publicKey);
-
                                         using (Stream dataStreamSig = literalData.GetInputStream())
                                         {
                                             byte[] buffer = new byte[4096];
@@ -145,30 +150,28 @@ namespace TestFunction
                                                 signature[0].Update(buffer, 0, bytesRead);
                                             }
                                         }
-
                                         if (signature[0].Verify())
                                         {
                                             Console.WriteLine("Signature verified successfully.");
-                                            return decryptedData;
-                                        }
-                                        else
-                                        {
-                                            Console.WriteLine("Signature verification failed.");
+                                            return (decryptedData, true);
                                         }
                                     }
+                                    else
+                                    {
+                                        Console.WriteLine("No signature found.");
+                                        return (null, false);
+                                    }
+
+                                    return (null, false);
                                 }
                                 else
                                 {
-                                    Console.WriteLine("No signature found.");
+                                    Console.WriteLine("No compressed data found.");
                                 }
-
-                                return decryptedData;
-                            }
-                            else
-                            {
-                                Console.WriteLine("No compressed data found.");
                             }
                         }
+
+                        return (null, false);
                     }
                 }
             }
@@ -183,14 +186,14 @@ namespace TestFunction
                     {
                         Console.WriteLine("Unsupported Algorithm - Details: {0}", pgpException.InnerException);
                     }
+                    throw ex;
                 }
                 else
                 {
                     Console.WriteLine($"An error occurred: {ex.Message}");
+                    throw ex;
                 }
             }
-
-            return null;
         }
 
         // Extension method to read all bytes from a stream
@@ -281,5 +284,13 @@ namespace TestFunction
             }
         }
 
+
+
+    }
+
+    public class DecryptionResponse
+    {
+        public string DecryptedFilePath { get; set; }
+        public bool IsSignatureVerified { get; set; }
     }
 }
